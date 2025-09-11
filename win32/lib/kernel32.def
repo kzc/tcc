@@ -264,6 +264,7 @@ GetFileAttributesExA
 GetFileAttributesExW
 GetFileAttributesW
 GetFileInformationByHandle
+GetFileInformationByHandleEx
 GetFileSize
 GetFileTime
 GetFileType
@@ -283,6 +284,7 @@ GetLocaleInfoW
 GetLogicalDriveStringsA
 GetLogicalDriveStringsW
 GetLogicalDrives
+GetLogicalProcessorInformation
 GetLongPathNameA
 GetLongPathNameW
 GetMailslotInfo
