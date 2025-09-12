@@ -132,9 +132,9 @@ extern "C" {
   _CRTIMP int __cdecl __iscsymf(int _C);
   _CRTIMP int __cdecl __iscsym(int _C);
 
-#if (defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L) || !defined (NO_OLDNAMES)
-int __cdecl isblank(int _C);
-#endif
+  // isblank is inlined to work with either msvcrt.dll or ucrtbase.dll.
+  // isblank doesn't exist in msvcrt.dll, but _isctype exists in both DLLs.
+  static inline int isblank(int _C) { return _C == '\t' || _isctype(_C, _BLANK); }
 #endif
 
 #ifndef _WCTYPE_DEFINED
