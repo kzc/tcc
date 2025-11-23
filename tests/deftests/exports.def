@@ -1,0 +1,6 @@
+EXPORTS
+    lib_name
+    func_one	@11 NONAME
+    func_to
+    func_three	@33
+    func_four	@44 NONAME

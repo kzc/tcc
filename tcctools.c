@@ -439,7 +439,7 @@ usage:
         goto the_end;
     }
 
-    fprintf(op, "LIBRARY %s\n\nEXPORTS\n", tcc_basename(file));
+    fprintf(op, "LIBRARY \"%s\"\n\nEXPORTS\n", tcc_basename(file));
     for (q = p, i = 0; *q; ++i) {
         fprintf(op, "%s\n", q);
         q += strlen(q) + 1;
