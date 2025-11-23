@@ -942,6 +942,9 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
     tcc_free(s1->mapfile);
     tcc_free(s1->outfile);
     tcc_free(s1->deps_outfile);
+#if defined TCC_TARGET_PE
+    tcc_free(s1->pe_emit_def);
+#endif
 #if defined TCC_TARGET_MACHO
     tcc_free(s1->install_name);
 #endif
@@ -1472,6 +1475,9 @@ static int tcc_set_linker(TCCState *s, const char *optarg)
         } else if (link_option(&o, "znodelete")) {
             s->znodelete = 1;
 #ifdef TCC_TARGET_PE
+        } else if (link_option(&o, "emit-def=")) {
+            tcc_set_str(&s->pe_emit_def, o.arg);
+            s->rdynamic = 1; /* -rdynamic implicitly set when using -emit-def= */
         } else if (link_option(&o, "large-address-aware")) {
             s->pe_characteristics |= 0x20;
         } else if (link_option(&o, "file-alignment=")) {
@@ -1571,7 +1577,9 @@ enum {
     TCC_OPTION_MP,
     TCC_OPTION_x,
     TCC_OPTION_ar,
+    /* pe */
     TCC_OPTION_impdef,
+    TCC_OPTION_emit_def,
     /* macho */
     TCC_OPTION_dynamiclib,
     TCC_OPTION_flat_namespace,
@@ -1681,6 +1689,7 @@ static const TCCOption tcc_options[] = {
     { "ar", TCC_OPTION_ar, 0},
 #ifdef TCC_TARGET_PE
     { "impdef", TCC_OPTION_impdef, 0},
+    { "emit_def", TCC_OPTION_emit_def, TCC_OPTION_HAS_ARG },
 #endif
     /* ignored (silently, except after -Wunsupported) */
     { "arch", 0, TCC_OPTION_HAS_ARG},
@@ -2020,6 +2029,11 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
         case TCC_OPTION_soname:
             tcc_set_str(&s->soname, optarg);
             break;
+#ifdef TCC_TARGET_PE
+        case TCC_OPTION_emit_def:
+            tcc_set_str(&s->pe_emit_def, optarg);
+            break;
+#endif
         case TCC_OPTION_o:
             if (s->outfile) {
                 tcc_warning("multiple -o option");

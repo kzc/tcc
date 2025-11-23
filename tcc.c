@@ -142,6 +142,7 @@ static const char help2[] =
     "  -image-base= -Ttext=          set base address of executable\n"
     "  -section-alignment=           set section alignment in executable\n"
 #ifdef TCC_TARGET_PE
+    "  -emit-def=                    set PE output .def filename and -rdynamic\n"
     "  -file-alignment=              set PE file alignment\n"
     "  -stack=                       set PE stack reserve\n"
     "  -large-address-aware          set related PE option\n"

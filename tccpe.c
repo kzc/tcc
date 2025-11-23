@@ -1041,15 +1041,17 @@ static void pe_build_exports(struct pe_info *pe)
 
 #if 1
     /* automatically write exports to <output-filename>.def */
-    pstrcpy(buf, sizeof buf, pe->filename);
-    strcpy(tcc_fileextension(buf), ".def");
-    op = fopen(buf, "wb");
-    if (NULL == op) {
-        tcc_error_noabort("could not create '%s': %s", buf, strerror(errno));
-    } else {
-        fprintf(op, "LIBRARY %s\n\nEXPORTS\n", dllname);
-        if (s1->verbose)
-            printf("<- %s (%d symbol%s)\n", buf, sym_count, &"s"[sym_count < 2]);
+    pstrcpy(buf, sizeof buf, pe->s1->pe_emit_def ? pe->s1->pe_emit_def : pe->filename);
+    if (strcmp(buf, "NUL") != 0) {
+        strcpy(tcc_fileextension(buf), ".def");
+        op = fopen(buf, "wb");
+        if (NULL == op) {
+            tcc_error_noabort("could not create '%s': %s", buf, strerror(errno));
+        } else {
+            fprintf(op, "LIBRARY %s\n\nEXPORTS\n", dllname);
+            if (s1->verbose)
+                printf("<- %s (%d symbol%s)\n", buf, sym_count, &"s"[sym_count < 2]);
+        }
     }
 #endif
 
