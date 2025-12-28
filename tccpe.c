@@ -1741,7 +1741,7 @@ static char *get_token(char **s, char *f)
     return p;
 }
 
-static int pe_load_def(TCCState *s1, int fd)
+static int pe_load_def(TCCState *s1, int fd, const char *filename)
 {
     int state = 0, ret = -1, dllindex = 0, ord;
     char dllname[80], *buf, *line, *p, *x, next;
@@ -1756,11 +1756,19 @@ static int pe_load_def(TCCState *s1, int fd)
             goto skip;
         switch (state) {
         case 0:
-            if (0 != stricmp(p, "LIBRARY") || next == '\n')
-                goto quit;
-            pstrcpy(dllname, sizeof dllname, get_token(&line, &next));
-            ++state;
-            break;
+            if (0 == stricmp(p, "EXPORTS")) {
+                // It's an EXPORTS .def file without a LIBRARY name.
+                // Just use the .def suffixed filename as the LIBRARY name.
+                pstrcpy(dllname, sizeof dllname, tcc_basename(filename));
+                ++state;
+                /* fall through */
+            } else {
+                if (0 != stricmp(p, "LIBRARY") || next == '\n')
+                    goto quit;
+                pstrcpy(dllname, sizeof dllname, get_token(&line, &next));
+                ++state;
+                break;
+            }
         case 1:
             if (0 != stricmp(p, "EXPORTS"))
                 goto quit;
@@ -1816,7 +1824,7 @@ ST_FUNC int pe_load_file(struct TCCState *s1, int fd, const char *filename)
     int ret = -1;
     char buf[10];
     if (0 == strcmp(tcc_fileextension(filename), ".def"))
-        ret = pe_load_def(s1, fd);
+        ret = pe_load_def(s1, fd, filename);
     else if (pe_load_res(s1, fd) == 0)
         ret = 0;
     else if (read_mem(fd, 0, buf, 4) && 0 == memcmp(buf, "MZ", 2))
