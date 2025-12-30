@@ -857,12 +857,15 @@ LIBTCCAPI int tcc_compile_string_file(TCCState *s, const char *str, const char *
 /* define a preprocessor symbol. value can be NULL, sym can be "sym=val" */
 LIBTCCAPI void tcc_define_symbol(TCCState *s1, const char *sym, const char *value)
 {
-    const char *eq;
+    const char *eq, *bsfix;
+    int vlen;
     if (NULL == (eq = strchr(sym, '=')))
         eq = strchr(sym, 0);
     if (NULL == value)
         value = *eq ? eq + 1 : "1";
-    cstr_printf(&s1->cmdline_defs, "#define %.*s %s\n", (int)(eq-sym), sym, value);
+    vlen = strlen(value);
+    bsfix = vlen && value[vlen-1] == '\\' ? "\\\n" : "";
+    cstr_printf(&s1->cmdline_defs, "#define %.*s %s%s\n", (int)(eq-sym), sym, value, bsfix);
 }
 
 /* undefine a preprocessor symbol */
