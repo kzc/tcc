@@ -1,0 +1,10 @@
+int main() {
+char src_char = ("\\"[0]);
+assert(src_char == '\\');
+char cli_char = ("\\"[0]);
+assert(cli_char == '\\');
+puts("\\Unquoted\\Str1\\With\\Continuation\\Line\\");
+puts("\\Unquoted\\Str2\\");
+puts("\\Unquoted\\Str3\\from\\CLI\\");
+return 0;
+}
