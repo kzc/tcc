@@ -953,6 +953,7 @@ struct TCCState {
     unsigned pe_stack_size;
     addr_t pe_imagebase;
     char *pe_emit_def; /* as specified on the command line (-emit-def) */
+    struct pe_exports *pe_exports;
 # ifdef TCC_TARGET_X86_64
     Section *uw_pdata;
     int uw_sym;

@@ -19,6 +19,7 @@
  */
 
 #include "tcc.h"
+#include <assert.h>
 
 #define PE_MERGE_DATA 1
 #define PE_PRINT_SECTIONS 0
@@ -866,6 +867,11 @@ static void pe_free_imports(struct pe_info *pe)
 }
 
 /*----------------------------------------------------------------------------*/
+
+#define PE_Sym_st_value(ORDINAL, NONAME)  (((ORDINAL) << 1) | ((NONAME) & 1))
+#define PE_Sym_st_value_NONAME(ST_VALUE)  ((ST_VALUE) & 1)
+#define PE_Sym_st_value_ORDINAL(ST_VALUE) ((ST_VALUE) >> 1)
+
 static void pe_build_imports(struct pe_info *pe)
 {
     int thk_ptr, ent_ptr, dll_ptr, sym_cnt, i;
@@ -927,7 +933,8 @@ static void pe_build_imports(struct pe_info *pe)
                 } while (iat_index);
 
                 if (dllref)
-                    v = 0, ordinal = imp_sym->st_value; /* ordinal from pe_load_def */
+                    // ordinal from pe_load_def
+                    v = 0, ordinal = PE_Sym_st_value_ORDINAL(imp_sym->st_value);
                 else
                     ordinal = 0, v = imp_sym->st_value; /* address from tcc_add_symbol() */
 
@@ -942,11 +949,12 @@ static void pe_build_imports(struct pe_info *pe)
                         tcc_error_noabort("could not resolve symbol '%s'", name);
                 } else
 #endif
-                if (ordinal) {
+                if (ordinal && PE_Sym_st_value_NONAME(imp_sym->st_value)) {
                     v = ordinal | (ADDR3264)1 << (sizeof(ADDR3264)*8 - 1);
                 } else {
+                    // Use import ordinal hints similar to gcc/clang.
                     v = pe->thunk->data_offset + rva_base;
-                    section_ptr_add(pe->thunk, sizeof(WORD)); /* hint, not used */
+                    *(WORD*)section_ptr_add(pe->thunk, sizeof(WORD)) = ordinal;
                     put_elf_str(pe->thunk, name);
                 }
 
@@ -965,10 +973,158 @@ static void pe_build_imports(struct pe_info *pe)
 
 /* ------------------------------------------------------------- */
 
+enum { PE_MAX_ORDINAL = 0xffff };
+
+struct pe_export {
+    char *name;
+    int ordinal;              // Ordinal or zero for unassigned
+    unsigned char noname;
+    unsigned char is_valid;   // Ignore element if !is_valid
+};
+
+struct pe_exports {
+    char *filename;           // .def path
+    struct pe_export **exps;
+    int nb_exps;
+    int ordinal_max;          // Largest original ordinal
+    unsigned char is_sorted;
+};
+
+static int pe_exports_count(TCCState *s1)
+{
+    struct pe_exports *exports = s1->pe_exports;
+    return exports ? exports->nb_exps : 0;
+}
+
+static int pe_exports_ordinal_max(TCCState *s1)
+{
+    struct pe_exports *exports = s1->pe_exports;
+    return exports ? exports->ordinal_max : 0;
+}
+
+static int pe_exports_add(TCCState *s1,
+    const char *filename, const char *sym, int ordinal, int noname)
+{
+    struct pe_export *e;
+    struct pe_exports *exports = s1->pe_exports;
+    if (!exports) {
+        exports = s1->pe_exports = tcc_mallocz(sizeof(struct pe_exports));
+        exports->filename = tcc_strdup(filename);
+    } else if (0 != strcmp(exports->filename, filename)) {
+        tcc_error_noabort(
+            "cannot specify more than one exports file: '%s' and '%s'",
+            exports->filename, filename);
+        return 0;
+    }
+
+    assert(ordinal >= 0 && ordinal <= PE_MAX_ORDINAL);
+    if (ordinal > exports->ordinal_max)
+        exports->ordinal_max = ordinal;
+
+    e = tcc_malloc(sizeof(struct pe_export));
+    e->name = tcc_strdup(sym);
+    e->ordinal = ordinal;
+    e->noname = noname;
+    e->is_valid = 1;
+    dynarray_add(&exports->exps, &exports->nb_exps, e);
+    exports->is_sorted = 0;
+    return 1;
+}
+
+static int pe_exports_sym_cmp(struct pe_export **a, struct pe_export **b)
+{
+    return strcmp((*a)->name, (*b)->name);
+}
+
+static int pe_exports_sort(TCCState *s1)
+{
+    struct pe_exports *exports = s1->pe_exports;
+    if (exports) {
+        qsort(exports->exps, exports->nb_exps, sizeof *exports->exps,
+            (int(*)(const void*,const void*))pe_exports_sym_cmp);
+        exports->is_sorted = 1;
+
+        {   // Scan the sorted .def exports for duplicates
+            const char *prev_name = NULL;
+            int i, size = exports->nb_exps;
+            for (i = 0; i < size; ++i) {
+                const char* name = exports->exps[i]->name;
+                if (prev_name && 0 == strcmp(name, prev_name)) {
+                    tcc_error_noabort("duplicate symbol '%s'", name);
+                    return 0;
+                }
+                prev_name = name;
+            }
+        }
+    }
+    return 1;
+}
+
+// Determine whether sym is a .def export via binary search.
+// If p_ordinal is non-null populate *p_ordinal with the def ordinal and
+// mark the def element as not valid so it is skipped in future searches.
+static int
+pe_exports_has(TCCState *s1, const char *sym, int *p_ordinal, int *p_noname)
+{
+    struct pe_exports *exports = s1->pe_exports;
+    if (exports) {
+        int L = 0, R = exports->nb_exps - 1;
+        assert(exports->is_sorted);
+        while (L <= R) {
+            int mid = L + (R - L) / 2;
+            int diff = strcmp(exports->exps[mid]->name, sym);
+            if (diff < 0)
+                L = mid + 1;
+            else if (diff > 0)
+                R = mid - 1;
+            else {
+                struct pe_export *e = exports->exps[mid];
+                if (e->is_valid) {
+                    if (p_ordinal) {
+                        *p_ordinal = e->ordinal;
+                        *p_noname = e->noname;
+                        e->is_valid = 0;
+                    }
+                    return 1;  // found
+                }
+                break;  // not found
+            }
+        }
+    }
+    if (p_ordinal) {
+        *p_ordinal = 0;
+        *p_noname = 0;
+    }
+    return 0;  // not found
+}
+
+static void pe_exports_free(TCCState *s1)
+{
+    struct pe_exports *exports = s1->pe_exports;
+    if (exports) {
+        int i, size = exports->nb_exps;
+        for (i = 0; i < size; i++) {
+            struct pe_export *e = exports->exps[i];
+            if (e->is_valid) {
+                tcc_error_noabort(
+                    "%s: cannot export '%s': symbol not defined",
+                    exports->filename, e->name);
+            }
+            tcc_free(e->name);
+        }
+        tcc_free(exports->filename);
+        dynarray_reset(&exports->exps, &exports->nb_exps);
+        tcc_free(exports);
+        s1->pe_exports = NULL;
+    }
+}
+
+/* ------------------------------------------------------------- */
+
 struct pe_sort_sym
 {
-    int index;
     const char *name;
+    int sym_index, ordinal, noname;
 };
 
 static int sym_cmp(const void *va, const void *vb)
@@ -983,8 +1139,9 @@ static void pe_build_exports(struct pe_info *pe)
     ElfW(Sym) *sym;
     int sym_index, sym_end;
     DWORD rva_base, base_o, func_o, name_o, ord_o, str_o;
-    IMAGE_EXPORT_DIRECTORY *hdr;
-    int sym_count, ord;
+    int sym_count, ord_max, ord_base = PE_MAX_ORDINAL + 1;
+    int o, nb_noname = 0, export_addr_table_count, eat_idx;
+    unsigned char *ord_dup_check; // bool array mirroring Export Address Table
     struct pe_sort_sym **sorted, *p;
     TCCState *s1 = pe->s1;
 
@@ -995,15 +1152,30 @@ static void pe_build_exports(struct pe_info *pe)
 
     rva_base = pe->thunk->sh_addr - pe->imagebase;
     sym_count = 0, sorted = NULL, op = NULL;
+    ord_max = pe_exports_ordinal_max(s1);
 
     sym_end = symtab_section->data_offset / sizeof(ElfW(Sym));
     for (sym_index = 1; sym_index < sym_end; ++sym_index) {
         sym = (ElfW(Sym)*)symtab_section->data + sym_index;
         name = pe_export_name(s1, sym);
         if (sym->st_other & ST_PE_EXPORT) {
-            p = tcc_malloc(sizeof *p);
-            p->index = sym_index;
+            p = tcc_mallocz(sizeof *p);
+            p->sym_index = sym_index;
             p->name = name;
+            if (pe_exports_has(s1, name, &p->ordinal, &p->noname)
+                && p->ordinal > 0) {
+                if (p->ordinal < ord_base)
+                    ord_base = p->ordinal;
+                if (p->noname)
+                    ++nb_noname;
+            } else {
+                // Exports without ordinals are assigned ones above largest.
+                p->ordinal = ++ord_max;
+                if (ord_max > PE_MAX_ORDINAL) {
+                    tcc_error_noabort( /* internal error */
+                        "symbol '%s' ordinal assignment exceeds 65535", name);
+                }
+            }
             dynarray_add(&sorted, &sym_count, p);
         }
 #if 0
@@ -1021,28 +1193,34 @@ static void pe_build_exports(struct pe_info *pe)
 
     pe_align_section(pe->thunk, 16);
     dllname = tcc_basename(pe->filename);
+    if (ord_base > PE_MAX_ORDINAL)
+        ord_base = 1;  // No ordinals found in EXPORTS .def
 
     base_o = pe->thunk->data_offset;
     func_o = base_o + sizeof(IMAGE_EXPORT_DIRECTORY);
-    name_o = func_o + sym_count * sizeof (DWORD);
+    export_addr_table_count = ord_max - ord_base + 1;
+    name_o = func_o + export_addr_table_count * sizeof (DWORD);
     ord_o = name_o + sym_count * sizeof (DWORD);
     str_o = ord_o + sym_count * sizeof(WORD);
 
-    hdr = section_ptr_add(pe->thunk, str_o - base_o);
+    {
+    IMAGE_EXPORT_DIRECTORY *hdr = section_ptr_add(pe->thunk, str_o - base_o);
     hdr->Characteristics        = 0;
-    hdr->Base                   = 1;
-    hdr->NumberOfFunctions      = sym_count;
-    hdr->NumberOfNames          = sym_count;
+    hdr->Base                   = ord_base;
+    hdr->NumberOfFunctions      = export_addr_table_count;
+    hdr->NumberOfNames          = sym_count - nb_noname;
     hdr->AddressOfFunctions     = func_o + rva_base;
     hdr->AddressOfNames         = name_o + rva_base;
     hdr->AddressOfNameOrdinals  = ord_o + rva_base;
     hdr->Name                   = str_o + rva_base;
+    // hdr not valid after put_elf_* calls due to tcc_realloc
+    }
+
     put_elf_str(pe->thunk, dllname);
 
-#if 1
     /* automatically write exports to <output-filename>.def */
-    pstrcpy(buf, sizeof buf, pe->s1->pe_emit_def ? pe->s1->pe_emit_def : pe->filename);
-    if (strcmp(buf, "NUL") != 0) {
+    pstrcpy(buf, sizeof buf, s1->pe_emit_def ? s1->pe_emit_def : pe->filename);
+    if (stricmp(buf, "NUL") != 0) {
         strcpy(tcc_fileextension(buf), ".def");
         op = fopen(buf, "wb");
         if (NULL == op) {
@@ -1053,25 +1231,43 @@ static void pe_build_exports(struct pe_info *pe)
                 printf("<- %s (%d symbol%s)\n", buf, sym_count, &"s"[sym_count < 2]);
         }
     }
-#endif
 
-    for (ord = 0; ord < sym_count; ++ord)
-    {
-        p = sorted[ord], sym_index = p->index, name = p->name;
+    ord_dup_check = tcc_mallocz(export_addr_table_count);
+    for (o = 0; o < sym_count; ++o) {
+        p = sorted[o], sym_index = p->sym_index, name = p->name;
+        eat_idx = p->ordinal - ord_base;  // Export Address Table index
+        assert(eat_idx >= 0 && eat_idx < export_addr_table_count);
+
+        if (ord_dup_check[eat_idx]) {
+            tcc_error_noabort(
+                "duplicate ordinal %d detected for symbol '%s'",
+                eat_idx + ord_base, name);
+        }
+        ord_dup_check[eat_idx] = 1;  // Export Address Table pos marked as used
+
         /* insert actual address later in relocate_sections() */
         put_elf_reloc(symtab_section, pe->thunk,
-            func_o, R_XXX_RELATIVE, sym_index);
-        *(DWORD*)(pe->thunk->data + name_o)
-            = pe->thunk->data_offset + rva_base;
-        *(WORD*)(pe->thunk->data + ord_o)
-            = ord;
-        put_elf_str(pe->thunk, name);
-        func_o += sizeof (DWORD);
-        name_o += sizeof (DWORD);
-        ord_o += sizeof (WORD);
-        if (op)
-            fprintf(op, "%s\n", name);
+            func_o + eat_idx * sizeof (DWORD), R_XXX_RELATIVE, sym_index);
+
+        if (!p->noname) {
+            *(DWORD*)(pe->thunk->data + name_o)
+                = pe->thunk->data_offset + rva_base;
+            *(WORD*)(pe->thunk->data + ord_o) = eat_idx;
+            put_elf_str(pe->thunk, name);
+            name_o += sizeof (DWORD);
+            ord_o += sizeof (WORD);
+        }
+
+        // Emit .def exports. Output ordinal if it was in .def file.
+        if (op) {
+            if (ord_base + eat_idx <= pe_exports_ordinal_max(s1))
+                fprintf(op, "%s @%d%s\n", name, ord_base + eat_idx,
+                    p->noname ? " NONAME" : "");
+            else
+                fprintf(op, "%s\n", name);
+        }
     }
+    tcc_free(ord_dup_check);
 
     pe->exp_offs = base_o + rva_base;
     pe->exp_size = pe->thunk->data_offset - base_o;
@@ -1407,10 +1603,13 @@ static int pe_check_symbols(struct pe_info *pe)
                 is->iat_index = sym_index;
             }
 
-        } else if (s1->rdynamic
-                   && ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
-            /* if -rdynamic option, then export all non local symbols */
-            sym->st_other |= ST_PE_EXPORT;
+        } else if (ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
+            // If -rdynamic option and no EXPORTS, then export all non local
+            // symbols. Otherwise export what's in the EXPORTS symbol array.
+            if ((s1->rdynamic && pe_exports_count(s1) == 0)
+                || pe_exports_has(s1, pe_export_name(s1, sym), NULL, NULL)) {
+                sym->st_other |= ST_PE_EXPORT;
+            }
         }
     }
     return ret;
@@ -1743,50 +1942,85 @@ static char *get_token(char **s, char *f)
 
 static int pe_load_def(TCCState *s1, int fd, const char *filename)
 {
-    int state = 0, ret = -1, dllindex = 0, ord;
-    char dllname[80], *buf, *line, *p, *x, next;
+    int state = 0, ret = -1, dllindex = 0, ord, is_exports = 0, noname;
+    char dllname[80], *buf, *line, *p;
 
+    dllname[0] = 0;
     buf = tcc_load_text(fd);
     if (!buf)
         return ret;
 
     for (line = buf;; ++line)  {
+        char next = 0;
         p = get_token(&line, &next);
         if (!(*p && *p != ';'))
             goto skip;
         switch (state) {
         case 0:
-            if (0 == stricmp(p, "EXPORTS")) {
-                // It's an EXPORTS .def file without a LIBRARY name.
-                // Just use the .def suffixed filename as the LIBRARY name.
-                pstrcpy(dllname, sizeof dllname, tcc_basename(filename));
-                ++state;
-                /* fall through */
-            } else {
-                if (0 != stricmp(p, "LIBRARY") || next == '\n')
-                    goto quit;
-                pstrcpy(dllname, sizeof dllname, get_token(&line, &next));
-                ++state;
+            ++state;
+            if (0 == stricmp(p, "LIBRARY") || 0 == stricmp(p, "NAME")) {
+                if (next == '\n') {
+                    is_exports = 1;
+                } else {
+                    char *lib_name = get_token(&line, &next);
+                    char *lib_base = tcc_basename(lib_name);
+                    char *lib_ext = tcc_fileextension(lib_base);
+                    int lib_base_len = (int)(lib_ext - lib_base);
+                    char *out = s1->soname ? s1->soname
+                              : s1->outfile ? s1->outfile
+                              : "-";
+                    char *out_base = tcc_basename(out);
+                    char *out_ext = tcc_fileextension(out_base);
+                    int out_base_len = (int)(out_ext - out_base);
+                    if (lib_base_len == out_base_len
+                        && 0 == strnicmp(lib_base, out_base, lib_base_len)) {
+                        // This is an exports .def file - the LIBRARY name
+                        // matches the outfile without an extension.
+                        is_exports = 1;
+                    } else {
+                        // Otherwise this must be an imports .def file.
+                        pstrcpy(dllname, sizeof dllname, lib_name);
+                    }
+                }
                 break;
+            } else if (0 == stricmp(p, "EXPORTS")) {
+                is_exports = 1;
+                // fallthrough
+            } else {
+                goto quit;
             }
+            // fallthrough
         case 1:
             if (0 != stricmp(p, "EXPORTS"))
                 goto quit;
             ++state;
             break;
         case 2:
-            dllindex = tcc_add_dllref(s1, dllname, 0)->index;
+            if (!is_exports && dllname[0])
+                dllindex = tcc_add_dllref(s1, dllname, 0)->index;
             ++state;
             /* fall through */
         default:
-            /* get ordinal and will store in sym->st_value */
-            ord = 0;
+            ord = 0, noname = 0;
             if (next == '@') {
-                x = get_token(&line, &next);
+                char *x = get_token(&line, &next);
                 ord = (int)strtol(x + 1, &x, 10);
+                if (ord <= 0 || ord > PE_MAX_ORDINAL) {
+                    tcc_error_noabort("%s: invalid ordinal %d", filename, ord);
+                    goto quit;
+                }
+                if (next == 'N'
+                    && 0 == strcmp(get_token(&line, &next), "NONAME")) {
+                    noname = 1;
+                }
             }
-            //printf("token %s ; %s : %d\n", dllname, p, ord);
-            pe_putimport(s1, dllindex, p, ord);
+            if (is_exports) {
+                if (!pe_exports_add(s1, tcc_basename(filename), p, ord, noname))
+                    goto quit;
+            } else {
+                // Store import ordinal and NONAME in sym->st_value.
+                pe_putimport(s1, dllindex, p, PE_Sym_st_value(ord, noname));
+            }
             break;
         }
 skip:
@@ -1795,6 +2029,8 @@ skip:
         if (next != '\n')
             break;
     }
+    if (!pe_exports_sort(s1))
+        goto quit;
     ret = 0;
 quit:
     tcc_free(buf);
@@ -2114,6 +2350,7 @@ ST_FUNC int pe_output_file(TCCState *s1, const char *filename)
 #endif
     }
     pe_free_imports(&pe);
+    pe_exports_free(s1);
 #if PE_PRINT_SECTIONS
     if (g_debug & 8)
         pe_print_sections(s1, "tcc.log");

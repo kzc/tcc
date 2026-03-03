@@ -21,6 +21,7 @@ TESTS = \
  pp-dir \
  memtest \
  dlltest \
+ deftest \
  cross-test
 
 # test4_static -- Not all relocation types are implemented yet.
@@ -42,6 +43,9 @@ ifeq (,$(filter i386 x86_64,$(ARCH)))
 endif
 ifeq ($(OS),Windows_NT) # for libtcc_test to find libtcc.dll
  PATH := $(CURDIR)/$(TOP)$(if $(findstring ;,$(PATH)),;,:)$(PATH)
+endif
+ifneq ($(OS),Windows_NT) # for deftest
+ TESTS := $(filter-out deftest,$(TESTS))
 endif
 ifdef CONFIG_OSX
 LIBS += $(LINK_LIBTCC)
@@ -172,6 +176,33 @@ ifeq (,$(filter Darwin WIN32,$(TARGETOS)))
 	./tcc2$(EXESUF) $(TCCFLAGS) $(RUN_TCC) -run $(TOPSRC)/examples/ex1.c
 endif
 	@rm tcc2$(EXESUF) libtcc2$(DLLSUF)
+
+# test WIN32 .def ordinals/NONAME and the 4 permutations of tcc/gcc generated exe/dll
+deftest:
+	@echo ------------ $@ ------------
+	$(TCC) -shared deftests/lib.c deftests/exports.def -Wl,-emit-def=deftest_lib.def -o deftest_lib.dll && \
+	cp -f deftest_lib.dll deftest_lib.dll.tcc
+	$(TCC) deftests/main.c deftest_lib.def -o deftest_main.tcc
+	objdump -x -p deftest_main.tcc \
+		| grep -A7 deftest_lib.dll \
+		| awk '{print substr($$0,11)}' \
+		| LC_ALL=C sort -r \
+		| diff -u deftests/main.imports.expect -
+	objdump -p deftest_lib.dll.tcc \
+		| awk '/Ordinal   Hint Name/{p=1}{if(p)print;if($$0=="")p=0}' \
+		| LC_ALL=C sort \
+		| diff -u deftests/lib.exports.expect -
+	rm -f deftest_lib.dll
+	$(CC) -shared deftests/lib.c -Wl,--out-implib,deftest_lib.dll.a -Wl,deftests/exports.def -o deftest_lib.dll && \
+	cp -f deftest_lib.dll deftest_lib.dll.gcc
+	$(CC) deftests/main.c deftest_lib.dll.a -o deftest_main.gcc
+	strip deftest_main.tcc deftest_main.gcc deftest_lib.dll.tcc deftest_lib.dll.gcc
+	cp -f deftest_lib.dll.gcc deftest_lib.dll && \
+	./deftest_main.gcc && \
+	./deftest_main.tcc
+	cp -f deftest_lib.dll.tcc deftest_lib.dll && \
+	./deftest_main.gcc && \
+	./deftest_main.tcc
 
 memtest:
 	@echo ------------ $@ ------------
@@ -344,6 +375,7 @@ clean:
 	rm -f *-cc *-gcc *-tcc *.exe hello libtcc_test vla_test tcctest[1234]
 	rm -f asm-c-connect asm-c-connect-sep
 	rm -f ex? tcc_g weaktest.*.txt *.def *.pdb *.obj libtcc_test_mt
+	rm -f *.dll *.tcc
 	@$(MAKE) -C tests2 $@
 	@$(MAKE) -C pp $@
 
