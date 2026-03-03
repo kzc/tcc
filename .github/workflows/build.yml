@@ -2,7 +2,10 @@ name: build and test
 
 on:
   push:
-    branches: [ mob ]
+    branches: [muon]
+  pull_request:
+    branches: [muon]
+    types: [opened, synchronize, reopened]
 
 jobs:
   test-x86_64-linux:

@@ -1,0 +1,2 @@
+* text eol=lf
+tests/tcctest.c -text
